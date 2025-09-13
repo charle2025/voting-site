@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>تطبيق تصويت — GitHub Pages + Firebase (نسخة تجريبية)</title>
+  <style>
+    body{font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; max-width:900px;margin:24px auto;padding:12px}
+    header{display:flex;justify-content:space-between;align-items:center}
+    h1{margin:0 0 6px}
+    #status{margin:10px 0;color:#333}
+    #poll{background:#fff;border-radius:10px;padding:16px;box-shadow:0 4px 20px rgba(0,0,0,0.06)}
+    ul{list-style:none;padding:0;margin:0}
+    li{margin:8px 0}
+    button{padding:10px 14px;border-radius:10px;border:1px solid #ddd;background:linear-gradient(180deg,#fff,#f6f6f6);cursor:pointer}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    #results{margin-top:18px}
+    .hint{font-size:0.9em;color:#666}
+    footer{margin-top:22px;font-size:0.85em;color:#666}
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>تطبيق تصويت جاهز للنشر على GitHub Pages</h1>
+      <div class="hint">نسخة تجريبية: استبدل إعدادات Firebase بقيم مشروعك</div>
+    </div>
+  </header>
+
+  <div id="status">جارٍ الإعداد...</div>
+
+  <section id="poll">
+    <h2 id="poll-title">تحميل الاستفتاء...</h2>
+    <ul id="options"></ul>
+    <div id="results">
+      <h3>النتائج</h3>
+      <ul id="results-list"></ul>
+    </div>
+  </section>
+
+  <footer>
+    ملاحظة: هذه نسخة تعليمية. للحماية من التلاعب بالمعدلات استخدم Cloud Function لمعالجة العدّات من جهة الخادم.
+  </footer>
+
+  <script type="module">
+    // ------------ استيراد مكتبات Firebase (modular) عبر CDN --------------
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js";
+    import { getFirestore, doc, getDoc, setDoc, onSnapshot, runTransaction, increment, serverTimestamp } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore.js";
+    import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-auth.js";
+
+    /*
+      ضع هنا إعدادات الويب للتطبيق من Firebase Console
+      - اذهب إلى: Firebase Console > Project > Web app > SDK setup
+      - انسخ firebaseConfig والصقه مكان القيم الحمراء أدناه
+    */
+    const firebaseConfig = {
+      apiKey: "REPLACE_WITH_YOUR_API_KEY",
+      authDomain: "REPLACE_WITH_YOUR_AUTH_DOMAIN",
+      projectId: "REPLACE_WITH_YOUR_PROJECT_ID",
+      // باقي القيم اختياري حسب إعدادك
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+    const auth = getAuth(app);
+
+    const pollId = "sample-poll"; // يمكنك تغييره إلى أي معرف تريد
+    let uid = null;
+
+    // تسجيل دخول مجهول (يسمح بمعرّف فريد للمستخدم دون طلب تسجيل كامل)
+    signInAnonymously(auth).catch((err) => {
+      console.error('Auth error', err);
+      document.getElementById('status').textContent = 'فشل المصادقة: ' + (err.message || err);
+    });
+
+    onAuthStateChanged(auth, async (user) => {
+      if (!user) return;
+      uid = user.uid;
+      document.getElementById('status').textContent = 'متصل كمستخدم: ' + uid;
+      await initPoll();
+    });
+
+    async function initPoll(){
+      const pollRef = doc(db, 'polls', pollId);
+      const pollSnap = await getDoc(pollRef);
+
+      if (!pollSnap.exists()){
+        // إنشاء استفتاء تجريبي إن لم يوجد (يعمل مرة واحدة فقط)
+        await setDoc(pollRef, {
+          title: 'ما لونك المفضل؟',
+          options: { 'أحمر': 0, 'أزرق': 0, 'أخضر': 0 }
+        });
+      }
+
+      // استماع حي لتحديث النتائج
+      onSnapshot(pollRef, (snap) => {
+        if (!snap.exists()) return;
+        renderPoll(snap.data());
+      });
+
+      // التحقق إن المستخدم صوّت مسبقاً
+      const voteRef = doc(db, 'polls', pollId, 'votes', uid);
+      const voteSnap = await getDoc(voteRef);
+      if (voteSnap.exists()){
+        document.getElementById('status').textContent += ' — لقد صوتت بـ: ' + voteSnap.data().option;
+        document.body.classList.add('voted');
+      }
+    }
+
+    function renderPoll(data){
+      document.getElementById('poll-title').textContent = data.title || 'استفتاء';
+      const optionsEl = document.getElementById('options');
+      const resultsEl = document.getElementById('results-list');
+      optionsEl.innerHTML = '';
+      resultsEl.innerHTML = '';
+      const options = data.options || {};
+      Object.keys(options).forEach((key) => {
+        const count = options[key];
+        const li = document.createElement('li');
+        const btn = document.createElement('button');
+        btn.textContent = key;
+        btn.disabled = document.body.classList.contains('voted');
+        btn.onclick = () => castVote(key);
+        li.appendChild(btn);
+        optionsEl.appendChild(li);
+
+        const rli = document.createElement('li');
+        rli.textContent = `${key} — ${count} صوت`;
+        resultsEl.appendChild(rli);
+      });
+    }
+
+    async function castVote(optionKey){
+      if (!uid){ alert('الرجاء الانتظار... المصادقة قيد الإعداد.'); return; }
+      try{
+        await runTransaction(db, async (transaction) => {
+          const pollRef = doc(db, 'polls', pollId);
+          const pollSnap = await transaction.get(pollRef);
+          if (!pollSnap.exists()) throw new Error('الاستفتاء غير موجود');
+
+          const voteRef = doc(db, 'polls', pollId, 'votes', uid);
+          const voteSnap = await transaction.get(voteRef);
+          if (voteSnap.exists()) throw new Error('لقد صوتت مسبقاً');
+
+          transaction.update(pollRef, { [`options.${optionKey}`]: increment(1) });
+          transaction.set(voteRef, { uid, option: optionKey, createdAt: serverTimestamp() });
+        });
+        document.getElementById('status').textContent = 'تمّ التسجيل — شكراً!';
+        document.body.classList.add('voted');
+      }catch(err){
+        console.error(err);
+        alert('خطأ أثناء التصويت: ' + (err.message || err));
+      }
+    }
+  </script>
+</body>
+</html>
